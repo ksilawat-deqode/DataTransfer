@@ -99,4 +99,6 @@ def lambda_handler(event, context):
             update_query,
             (task_execution_arn, "INITIATED", job_id),
         )
+        connection.commit()
+        cursor.close()
         print(f"{job_id}-> Successfully updated data transfer details")
