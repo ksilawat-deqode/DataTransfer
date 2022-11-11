@@ -1,3 +1,4 @@
+import json
 import os
 from urllib.parse import urlparse
 
@@ -32,25 +33,33 @@ def lambda_handler(event, context):
             return
 
         job_id = data.get("id")
+        cross_bucket_region = data.get("cross_bucket_region")
         parsed_destination_uri = urlparse(data.get("destination"))
         destination_bucket_name = parsed_destination_uri.netloc
         destination_path = f"{parsed_destination_uri.path}/{job_id}"
 
-        print(f"{job_id}-> Found id: {job_id} corresponding to job_id:"
-              f" {emr_job_id}")
+        print(
+            f"{job_id}-> Found id: {job_id} corresponding to job_id:"
+            f"{emr_job_id}"
+        )
 
         client = boto3.client("datasync")
-
-        bucket_access_role_arn = \
-            os.environ.get("CROSS_ACCOUNT_BUCKET_ACCESS_ROLE_ARN")
-
-        source_bucket_arn = os.environ.get("INTERNAL_OUTPUT_BUCKET_ARN")
-        source_subdirectory = f"output/{job_id}/"
-        print(
-            f"{job_id} Creating Source Location with source_bucket_arn:"
-            f" {source_bucket_arn}, source_subdirectory: {source_subdirectory}"
+        external_client = boto3.client(
+            "datasync",
+            region_name=cross_bucket_region,
         )
+
         try:
+            bucket_access_role_arn = \
+                os.environ.get("CROSS_ACCOUNT_BUCKET_ACCESS_ROLE_ARN")
+
+            source_bucket_arn = os.environ.get("INTERNAL_OUTPUT_BUCKET_ARN")
+            source_subdirectory = f"output/{job_id}/"
+            print(
+                f"{job_id}-> Creating Source Location with source_bucket_arn:"
+                f" {source_bucket_arn}, source_subdirectory:"
+                f"{source_subdirectory}"
+            )
             source_location_arn = client.create_location_s3(
                 S3BucketArn=source_bucket_arn,
                 Subdirectory=source_subdirectory,
@@ -59,16 +68,18 @@ def lambda_handler(event, context):
                     "BucketAccessRoleArn": bucket_access_role_arn,
                 },
             ).get("LocationArn")
-            print(f"{job_id}-> Created Source Location ARN")
+            print(
+                f"{job_id}-> Created Source Location ARN: {source_location_arn}"
+            )
 
             destination_bucket_arn = f"arn:aws:s3:::{destination_bucket_name}"
             destination_subdirectory = destination_path
             print(
-                f"{job_id} Creating Destination Location with "
+                f"{job_id}-> Creating Destination Location with "
                 f"destination_bucket_arn: {destination_bucket_arn}, "
                 f"destination_subdirectory: {destination_subdirectory}"
             )
-            destination_location_arn = client.create_location_s3(
+            destination_location_arn = external_client.create_location_s3(
                 S3BucketArn=destination_bucket_arn,
                 Subdirectory=destination_subdirectory,
                 S3StorageClass="STANDARD",
@@ -76,19 +87,38 @@ def lambda_handler(event, context):
                     "BucketAccessRoleArn": bucket_access_role_arn,
                 },
             ).get("LocationArn")
-            print(f"{job_id}-> Created Destination Location ARN")
+            print(
+                f"{job_id}-> Created Destination Location ARN: "
+                f"{destination_location_arn}"
+            )
 
-            task_arn = client.create_task(
+            task_arn = external_client.create_task(
                 SourceLocationArn=source_location_arn,
                 DestinationLocationArn=destination_location_arn,
             ).get("TaskArn")
-            print(f"{job_id}-> Created Task ARN")
+            print(f"{job_id}-> Created Task ARN: {task_arn}")
 
-            task_execution_arn = client.start_task_execution(
+            task_execution_arn = external_client.start_task_execution(
                 TaskArn=task_arn,
             ).get("TaskExecutionArn")
-            print(f"{job_id}-> Created Task Execution ARN")
+            print(
+                f"{job_id}-> Created Task Execution ARN: {task_execution_arn}"
+            )
+
+            payload = {
+                "id": job_id,
+                "region_name": cross_bucket_region,
+                "task_execution_arn": task_execution_arn,
+            }
+            payload_bytes = json.dumps(payload).encode('utf-8')
+            boto3.client("lambda").invoke_async(
+                FunctionName=os.environ.get("POLLING_FUNCTION_ARN"),
+                InvokeArgs=payload_bytes,
+            )
         except Exception as e:
+            print(
+                f"{job_id}-> Data Transfer initialization failed with error:{e}"
+            )
             print(
                 f"{job_id}-> Updating jobstatus: FAILED, failed to initiate "
                 f"data transfer"
