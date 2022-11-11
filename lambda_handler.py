@@ -43,8 +43,15 @@ def lambda_handler(event, context):
             f"{emr_job_id}"
         )
 
-        client = boto3.client("datasync")
-        external_client = boto3.client(
+        secrets_client = boto3.client("secrets")
+        polling_function_arn = json.loads(
+            secrets_client.get_secret_value(
+                SecretId=os.environ.get("SECRETS"),
+            ).get("SecretString")
+        ).get("POLLING_FUNCTION_ARN")
+
+        data_sync_client = boto3.client("datasync")
+        external_data_sync_client = boto3.client(
             "datasync",
             region_name=cross_bucket_region,
         )
@@ -60,7 +67,7 @@ def lambda_handler(event, context):
                 f" {source_bucket_arn}, source_subdirectory:"
                 f"{source_subdirectory}"
             )
-            source_location_arn = client.create_location_s3(
+            source_location_arn = data_sync_client.create_location_s3(
                 S3BucketArn=source_bucket_arn,
                 Subdirectory=source_subdirectory,
                 S3StorageClass="STANDARD",
@@ -79,26 +86,27 @@ def lambda_handler(event, context):
                 f"destination_bucket_arn: {destination_bucket_arn}, "
                 f"destination_subdirectory: {destination_subdirectory}"
             )
-            destination_location_arn = external_client.create_location_s3(
-                S3BucketArn=destination_bucket_arn,
-                Subdirectory=destination_subdirectory,
-                S3StorageClass="STANDARD",
-                S3Config={
-                    "BucketAccessRoleArn": bucket_access_role_arn,
-                },
-            ).get("LocationArn")
+            destination_location_arn = \
+                external_data_sync_client.create_location_s3(
+                    S3BucketArn=destination_bucket_arn,
+                    Subdirectory=destination_subdirectory,
+                    S3StorageClass="STANDARD",
+                    S3Config={
+                        "BucketAccessRoleArn": bucket_access_role_arn,
+                    },
+                ).get("LocationArn")
             print(
                 f"{job_id}-> Created Destination Location ARN: "
                 f"{destination_location_arn}"
             )
 
-            task_arn = external_client.create_task(
+            task_arn = external_data_sync_client.create_task(
                 SourceLocationArn=source_location_arn,
                 DestinationLocationArn=destination_location_arn,
             ).get("TaskArn")
             print(f"{job_id}-> Created Task ARN: {task_arn}")
 
-            task_execution_arn = external_client.start_task_execution(
+            task_execution_arn = external_data_sync_client.start_task_execution(
                 TaskArn=task_arn,
             ).get("TaskExecutionArn")
             print(
@@ -112,7 +120,7 @@ def lambda_handler(event, context):
             }
             payload_bytes = json.dumps(payload).encode('utf-8')
             boto3.client("lambda").invoke_async(
-                FunctionName=os.environ.get("POLLING_FUNCTION_ARN"),
+                FunctionName=polling_function_arn,
                 InvokeArgs=payload_bytes,
             )
         except Exception as e:
