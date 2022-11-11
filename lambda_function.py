@@ -43,7 +43,7 @@ def lambda_handler(event, context):
             f"{emr_job_id}"
         )
 
-        secrets_client = boto3.client("secrets")
+        secrets_client = boto3.client("secretsmanager")
         polling_function_arn = json.loads(
             secrets_client.get_secret_value(
                 SecretId=os.environ.get("SECRETS"),
