@@ -6,6 +6,36 @@ import boto3
 import psycopg2
 from psycopg2.extras import RealDictCursor
 
+import logging
+from datetime import datetime
+from pythonjsonlogger import jsonlogger
+
+
+class CustomJsonFormatter(jsonlogger.JsonFormatter):
+    def add_fields(self, log_record, record, message_dict):
+        super(CustomJsonFormatter, self).add_fields(
+            log_record,
+            record,
+            message_dict,
+        )
+        if not log_record.get('timestamp'):
+            now = datetime.utcnow().strftime('%Y-%m-%dT%H:%M:%S.%fZ')
+            log_record['time'] = now
+        if log_record.get('level'):
+            log_record['level'] = log_record['level'].lower()
+        else:
+            log_record['level'] = record.levelname.lower()
+        log_record['source'] = "DataTransfer"
+
+
+logger = logging.getLogger(__name__)
+logger.setLevel(logging.INFO)
+
+formatter = CustomJsonFormatter('%(level)s %(msg)s %(time)s %(source)s')
+stream_handler = logging.StreamHandler()
+stream_handler.setFormatter(formatter)
+logger.addHandler(stream_handler)
+
 
 def lambda_handler(event, context):
     if event["source"] == "aws.emr-serverless":
@@ -22,14 +52,14 @@ def lambda_handler(event, context):
         cursor = connection.cursor(cursor_factory=RealDictCursor)
         select_query = "SELECT * FROM emr_job_details WHERE jobid=%s"
 
-        print(
-            f"Performing SELECT query for details with EMR job_id: {emr_job_id}"
+        logger.info(
+            f"Performing SELECT query for details with EMR job_id: {emr_job_id}",
         )
-        cursor.execute(select_query, (emr_job_id, ))
+        cursor.execute(select_query, (emr_job_id,))
 
         data = cursor.fetchone()
         if not data:
-            print(f"No rows found for job_id: {emr_job_id}")
+            logger.info(f"No rows found for job_id: {emr_job_id}")
             return
 
         job_id = data.get("id")
@@ -38,9 +68,20 @@ def lambda_handler(event, context):
         destination_bucket_name = parsed_destination_uri.netloc
         destination_path = f"{parsed_destination_uri.path}/{job_id}"
 
-        print(
-            f"{job_id}-> Found id: {job_id} corresponding to job_id:"
-            f"{emr_job_id}"
+        extra_log_info = {
+            "clientIp": data.get("client_ip"),
+            "destinationBucket": data.get("destination"),
+            "id": data.get("id"),
+            "jti": data.get("jti"),
+            "query": data.get("query"),
+            "region": data.get("cross_bucket_region"),
+            "skyflowRequestId": data.get("requestId"),
+        }
+
+        logger.info(
+            f" Found id: {job_id} corresponding to job_id:"
+            f"{emr_job_id}",
+            extra=extra_log_info,
         )
 
         secrets_client = boto3.client("secretsmanager")
@@ -62,11 +103,14 @@ def lambda_handler(event, context):
 
             source_bucket_arn = os.environ.get("INTERNAL_OUTPUT_BUCKET_ARN")
             source_subdirectory = f"output/{job_id}/"
-            print(
-                f"{job_id}-> Creating Source Location with source_bucket_arn:"
+
+            logger.info(
+                f" Creating Source Location with source_bucket_arn:"
                 f" {source_bucket_arn}, source_subdirectory:"
-                f"{source_subdirectory}"
+                f"{source_subdirectory}",
+                extra=extra_log_info,
             )
+
             source_location_arn = data_sync_client.create_location_s3(
                 S3BucketArn=source_bucket_arn,
                 Subdirectory=source_subdirectory,
@@ -75,17 +119,22 @@ def lambda_handler(event, context):
                     "BucketAccessRoleArn": bucket_access_role_arn,
                 },
             ).get("LocationArn")
-            print(
-                f"{job_id}-> Created Source Location ARN: {source_location_arn}"
+
+            logger.info(
+                f"Created Source Location ARN: {source_location_arn}",
+                extra=extra_log_info,
             )
 
             destination_bucket_arn = f"arn:aws:s3:::{destination_bucket_name}"
             destination_subdirectory = destination_path
-            print(
-                f"{job_id}-> Creating Destination Location with "
+
+            logger.info(
+                f"Creating Destination Location with "
                 f"destination_bucket_arn: {destination_bucket_arn}, "
-                f"destination_subdirectory: {destination_subdirectory}"
+                f"destination_subdirectory: {destination_subdirectory}",
+                extra=extra_log_info,
             )
+
             destination_location_arn = \
                 external_data_sync_client.create_location_s3(
                     S3BucketArn=destination_bucket_arn,
@@ -95,22 +144,30 @@ def lambda_handler(event, context):
                         "BucketAccessRoleArn": bucket_access_role_arn,
                     },
                 ).get("LocationArn")
-            print(
-                f"{job_id}-> Created Destination Location ARN: "
-                f"{destination_location_arn}"
+
+            logger.info(
+                f"Created Destination Location ARN: "
+                f"{destination_location_arn}",
+                extra=extra_log_info,
             )
 
             task_arn = external_data_sync_client.create_task(
                 SourceLocationArn=source_location_arn,
                 DestinationLocationArn=destination_location_arn,
             ).get("TaskArn")
-            print(f"{job_id}-> Created Task ARN: {task_arn}")
+
+            logger.info(
+                f"Created Task ARN: {task_arn}",
+                extra=extra_log_info,
+            )
 
             task_execution_arn = external_data_sync_client.start_task_execution(
                 TaskArn=task_arn,
             ).get("TaskExecutionArn")
-            print(
-                f"{job_id}-> Created Task Execution ARN: {task_execution_arn}"
+
+            logger.info(
+                f"Created Task Execution ARN: {task_execution_arn}",
+                extra=extra_log_info,
             )
 
             payload = {
@@ -124,12 +181,14 @@ def lambda_handler(event, context):
                 InvokeArgs=payload_bytes,
             )
         except Exception as e:
-            print(
-                f"{job_id}-> Data Transfer initialization failed with error:{e}"
+            logger.error(
+                f"Data Transfer initialization failed with error:{e}",
+                extra=extra_log_info,
             )
-            print(
-                f"{job_id}-> Updating jobstatus: FAILED, failed to initiate "
-                f"data transfer"
+
+            logger.info(
+                f"Updating jobstatus: FAILED, failed to initiate data transfer",
+                extra=extra_log_info,
             )
             failure_update_query = "UPDATE emr_job_details SET jobstatus=%s " \
                                    "WHERE id=%s"
@@ -140,20 +199,28 @@ def lambda_handler(event, context):
             )
             connection.commit()
             cursor.close()
-            print(f"{job_id}-> Successfully updated jobstatus: FAILED")
-            return
+
+            logger.info(
+                f"Successfully updated jobstatus: FAILED",
+                extra=extra_log_info,
+            )
 
         update_query = "UPDATE emr_job_details SET task_execution_arn=%s, " \
                        "data_transfer_state=%s WHERE id=%s"
 
-        print(
-            f"{job_id}-> Performing UPDATE query for data transfer details"
-            f" update"
+        logger.info(
+            f"Performing UPDATE query for data transfer details update",
+            extra=extra_log_info,
         )
+
         cursor.execute(
             update_query,
             (task_execution_arn, "INITIATED", job_id),
         )
         connection.commit()
         cursor.close()
-        print(f"{job_id}-> Successfully updated data transfer details")
+
+        logger.info(
+            f"Successfully updated data transfer details",
+            extra=extra_log_info,
+        )
