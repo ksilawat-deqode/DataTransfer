@@ -35,6 +35,7 @@ formatter = CustomJsonFormatter('%(level)s %(msg)s %(time)s %(source)s')
 stream_handler = logging.StreamHandler()
 stream_handler.setFormatter(formatter)
 logger.addHandler(stream_handler)
+logger.propagate = False
 
 
 def lambda_handler(event, context):
@@ -71,16 +72,16 @@ def lambda_handler(event, context):
         extra_log_info = {
             "clientIp": data.get("client_ip"),
             "destinationBucket": data.get("destination"),
-            "id": data.get("id"),
+            "queryId": data.get("id"),
             "jti": data.get("jti"),
             "query": data.get("query"),
             "region": data.get("cross_bucket_region"),
-            "skyflowRequestId": data.get("requestId"),
+            "skyflowRequestId": data.get("requestid"),
         }
 
         logger.info(
-            f" Found id: {job_id} corresponding to job_id:"
-            f"{emr_job_id}",
+            f"Found id: {job_id} corresponding to job_id:"
+            f" {emr_job_id}",
             extra=extra_log_info,
         )
 
@@ -105,9 +106,9 @@ def lambda_handler(event, context):
             source_subdirectory = f"output/{job_id}/"
 
             logger.info(
-                f" Creating Source Location with source_bucket_arn:"
+                f"Creating Source Location with source_bucket_arn:"
                 f" {source_bucket_arn}, source_subdirectory:"
-                f"{source_subdirectory}",
+                f" {source_subdirectory}",
                 extra=extra_log_info,
             )
 
